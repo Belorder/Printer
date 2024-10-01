@@ -205,8 +205,6 @@ public class BluetoothPrinterManager {
             return .deviceNotReady
         }
 
-        let serviceUUIDs = BluetoothPrinterManager.specifiedServices.map { CBUUID(string: $0) }
-
         centralManager.scanForPeripherals(withServices: nil, options: nil)
 
         return nil
