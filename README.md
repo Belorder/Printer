@@ -10,7 +10,7 @@ Swift ticket printer framework for ESC/POS-compatible thermal printers
 * Create printable ticket easily.
 
 ## Requirements
-* iOS 9.0+
+* iOS 12.0+
 * Swift 5.0
 
 ## Installation
@@ -27,12 +27,6 @@ pod 'Printer'
 
 ```
 github "KevinGong2013/Printer"
-```
-
-### Swift Package Manager
-File -> Add Package -> Enter Package URL 
-```
-https://github.com/KevinGong2013/Printer
 ```
 
 ## Getting Started
@@ -97,7 +91,3 @@ dummyPrinter.print(ticket)
 
 ### Ticket && Blocks
 [TODO]
-
-### Notes
-- Send data to your own Bluetooth Manager is possible
-  
