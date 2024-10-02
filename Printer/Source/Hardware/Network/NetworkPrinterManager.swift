@@ -115,35 +115,30 @@ public class NetworkPrinterManager {
 
         connection.cancel()
     }
-
-    public func print(_ ticket: Ticket) throws {
+    
+    public func print(_ ticket: Ticket, completion: @escaping (Bool, Error?) -> Void) {
         guard let connection = networkConnection else {
-            throw TicketPrintError.notConnected
+            completion(false, TicketPrintError.notConnected)
+            return
         }
 
         if connection.state != .ready {
-            throw TicketPrintError.notConnected
+            completion(false, TicketPrintError.notConnected)
+            return
         }
-        
-        var printError: Error?
+
         let content = getTicketData(ticket)
-        let dispatchGroup = DispatchGroup()
-        dispatchGroup.enter()
 
-        connection.send(content: content, completion: NWConnection.SendCompletion.contentProcessed({ (nwError) in
+        connection.send(content: content, isComplete: true, completion: NWConnection.SendCompletion.contentProcessed({ (nwError) in
             if let error = nwError {
-                printError = TicketPrintError.networkError(error)
+                completion(false, TicketPrintError.networkError(error))
+            } else {
+                completion(true, nil)
             }
-            dispatchGroup.leave()
         }))
-
-        dispatchGroup.wait()
-
-        if let error = printError {
-            throw error
-        }
     }
-    
+
+
     private func getTicketData(_ ticket: Ticket) -> Data {
         var combinedData = Data()
         let ticketData = ticket.data(using: .utf8)
