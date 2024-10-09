@@ -143,7 +143,7 @@ public class NetworkPrinterManager {
         }
 
         if connection.state != .ready {
-            completion(false, TicketPrintError.notConnected)
+            completion(false, TicketPrintError.notReady)
             return
         }
 
