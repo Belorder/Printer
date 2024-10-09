@@ -9,6 +9,40 @@ import Foundation
 import Network
 import MobileCoreServices
 
+public enum TicketPrintError: Error {
+    case printError(NWError)
+    case connectionError(NWError)
+    case notConnected
+    case notReady
+    case port
+    case connectionTimeout
+    case connectionStateTimeout(state: NWConnection.State)
+    case unknownError
+}
+
+extension TicketPrintError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .printError(let nwError):
+            return "Network error \(nwError.localizedDescription)"
+        case .connectionError(let nwError):
+            return "Connection error \(nwError.localizedDescription)"
+        case .notConnected:
+            return "You are not connected to the printer"
+        case .notReady:
+            return "The printer is not ready"
+        case .port:
+            return "Invalid port"
+        case .connectionTimeout:
+            return "We can't connect to the printer"
+        case .connectionStateTimeout(let state):
+            return "Bad state after timeout: \(state)"
+        case .unknownError:
+            return "An unknown error has occurred"
+        }
+    }
+}
+
 @available(iOS 12.0, *)
 public class NetworkPrinterManager {
     private var networkConnection: NWConnection?
@@ -16,14 +50,6 @@ public class NetworkPrinterManager {
     private var port: Int?
 
     public init() {}
-
-    public enum TicketPrintError: Error {
-        case networkError(NWError)
-        case notConnected
-        case unknownError
-        case port
-        case connection(NWError)
-    }
 
     public var onConnectionStateChange: ((NWConnection.State) -> Void)?
 
@@ -43,21 +69,21 @@ public class NetworkPrinterManager {
         return self.port
     }
     
-    public func waitForConnectionReady(timeout: TimeInterval = 2, completion: @escaping (Bool) -> Void) {
+    public func waitForConnectionReady(timeout: TimeInterval = 2, completion: @escaping (Result<Bool, TicketPrintError>) -> Void) {
         let startTime = Date()
 
         DispatchQueue.global().async {
             while true {
                 if self.getConnectionState() == .ready {
-                    completion(true)
+                    completion(.success(true))
                     return
-                } else if self.getConnectionState() == .cancelled {
-                    completion(false)
+                } else if let currentState = self.getConnectionState(), currentState == .cancelled {
+                    completion(.failure(.connectionStateTimeout(state: currentState)))
                     return
                 }
 
                 if Date().timeIntervalSince(startTime) > timeout {
-                    completion(false)
+                    completion(.failure(.connectionStateTimeout(state: self.getConnectionState() ?? .setup)))
                     return
                 }
 
@@ -86,12 +112,6 @@ public class NetworkPrinterManager {
                     self?.ip = ip
                     self?.port = port
                     UserDefaults.standard.set(true, forKey: "isConnected")
-                case .failed:
-                    UserDefaults.standard.set(false, forKey: "isConnected")
-                case .cancelled:
-                    UserDefaults.standard.set(false, forKey: "isConnected")
-                case .preparing:
-                    UserDefaults.standard.set(false, forKey: "isConnected")
                 default:
                     UserDefaults.standard.set(false, forKey: "isConnected")
             }
@@ -131,13 +151,12 @@ public class NetworkPrinterManager {
 
         connection.send(content: content, isComplete: true, completion: NWConnection.SendCompletion.contentProcessed({ (nwError) in
             if let error = nwError {
-                completion(false, TicketPrintError.networkError(error))
+                completion(false, TicketPrintError.printError(error))
             } else {
                 completion(true, nil)
             }
         }))
     }
-
 
     private func getTicketData(_ ticket: Ticket) -> Data {
         var combinedData = Data()
