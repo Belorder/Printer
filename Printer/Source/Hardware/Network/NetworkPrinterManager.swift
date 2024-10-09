@@ -83,6 +83,10 @@ public class NetworkPrinterManager {
                 }
 
                 if Date().timeIntervalSince(startTime) > timeout {
+                    if (self.networkConnection != nil) {
+                        self.networkConnection?.cancel()
+                        self.networkConnection?.stateUpdateHandler = nil
+                    }
                     completion(.failure(.connectionStateTimeout(state: self.getConnectionState() ?? .setup)))
                     return
                 }
@@ -119,7 +123,7 @@ public class NetworkPrinterManager {
 
         networkConnection?.start(queue: queue)
     }
-    
+
     public func disconnect(completion: @escaping () -> Void) {
         guard let connection = networkConnection else {
             completion()
@@ -135,7 +139,7 @@ public class NetworkPrinterManager {
 
         connection.cancel()
     }
-    
+
     public func print(_ ticket: Ticket, completion: @escaping (Bool, Error?) -> Void) {
         guard let connection = networkConnection else {
             completion(false, TicketPrintError.notConnected)
