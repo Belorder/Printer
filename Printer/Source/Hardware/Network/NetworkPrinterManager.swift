@@ -3,7 +3,7 @@
 //  Printer
 //
 //  Created by Geoffrey Desbrosses on 19/09/2024.
-//  Copyright © 2024 Kevin. All rights reserved.
+//  Copyright © 2024 Belorder. All rights reserved.
 //
 import Foundation
 import Network
@@ -69,6 +69,9 @@ public class NetworkPrinterManager {
         return self.port
     }
     
+    /**
+     * Async function to wait for the connection to be etablish
+     */
     public func waitForConnectionReady(timeout: TimeInterval = 2, completion: @escaping (Result<Bool, TicketPrintError>) -> Void) {
         let startTime = Date()
 
@@ -83,10 +86,6 @@ public class NetworkPrinterManager {
                 }
 
                 if Date().timeIntervalSince(startTime) > timeout {
-                    if (self.networkConnection != nil) {
-                        self.networkConnection?.cancel()
-                        self.networkConnection?.stateUpdateHandler = nil
-                    }
                     completion(.failure(.connectionStateTimeout(state: self.getConnectionState() ?? .setup)))
                     return
                 }
@@ -96,7 +95,31 @@ public class NetworkPrinterManager {
         }
     }
 
+    /**
+     * Connect to the peripheral if needed
+     */
     public func connect(ip: String, port: Int) throws {
+        let shouldDisconnect = (self.ip != nil && self.port != nil) && (self.ip != ip || self.port != port)
+        
+        // Already connected to the right peripheral.
+        if (self.networkConnection?.state == .ready && !shouldDisconnect) {
+            return
+        }
+
+        // Init first connection
+        if (self.networkConnection?.state != .ready && !shouldDisconnect) {
+            return try self.initNewConnection(ip: ip, port: port)
+        }
+
+        // Change peripheral
+        self.disconnect()
+        try self.initNewConnection(ip: ip, port: port)
+    }
+
+    /**
+     * Create a new connection from IP/Port
+     */
+    private func initNewConnection(ip: String, port: Int) throws {
         guard let PORT = NWEndpoint.Port("\(port)") else {
             throw TicketPrintError.port
         }
@@ -124,22 +147,16 @@ public class NetworkPrinterManager {
         networkConnection?.start(queue: queue)
     }
 
-    public func disconnect(completion: @escaping () -> Void) {
-        guard let connection = networkConnection else {
-            completion()
-            return
-        }
-
-        connection.stateUpdateHandler = { newState in
-            if newState == .cancelled {
-                connection.stateUpdateHandler = nil
-                completion()
-            }
-        }
-
-        connection.cancel()
+    /**
+     * Cancel the current connection
+     */
+    public func disconnect() {
+        networkConnection?.cancel()
     }
 
+    /**
+     * Send message to print ticket
+     */
     public func print(_ ticket: Ticket, completion: @escaping (Bool, Error?) -> Void) {
         guard let connection = networkConnection else {
             completion(false, TicketPrintError.notConnected)
@@ -162,6 +179,9 @@ public class NetworkPrinterManager {
         }))
     }
 
+    /**
+     * Get data to send to the printer
+     */
     private func getTicketData(_ ticket: Ticket) -> Data {
         var combinedData = Data()
         let ticketData = ticket.data(using: .utf8)
