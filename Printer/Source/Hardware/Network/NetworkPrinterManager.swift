@@ -169,7 +169,6 @@ public class NetworkPrinterManager {
         }
 
         let content = getTicketData(ticket)
-
         connection.send(content: content, isComplete: true, completion: NWConnection.SendCompletion.contentProcessed({ (nwError) in
             if let error = nwError {
                 completion(false, TicketPrintError.printError(error))
@@ -184,9 +183,9 @@ public class NetworkPrinterManager {
      */
     private func getTicketData(_ ticket: Ticket) -> Data {
         var combinedData = Data()
-        let ticketData = ticket.data(using: .utf8)
-        for dataPart in ticketData {
-            combinedData.append(dataPart)
+        
+        for data in ticket.data(using: .utf8) {
+            combinedData.append(data)
         }
 
         let paperCutCommand: [UInt8] = [0x1D, 0x56, 0x00]

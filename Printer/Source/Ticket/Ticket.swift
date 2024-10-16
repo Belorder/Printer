@@ -24,8 +24,7 @@ public struct Ticket {
     }
     
     public func data(using encoding: String.Encoding) -> [Data] {
-        
-        var ds = blocks.map { Data.reset + $0.data(using: encoding) }
+        var ds = blocks.map { Data(esc_pos: .resetStyle) + $0.data(using: encoding) }
         
         if feedLinesOnHead > 0 {
             ds.insert(Data(esc_pos: .printAndFeed(lines: feedLinesOnHead)), at: 0)
@@ -35,6 +34,7 @@ public struct Ticket {
             ds.append(Data(esc_pos: .printAndFeed(lines: feedLinesOnTail)))
         }
         
+        ds.insert(Data.reset, at: 0)
         return ds
     }
 }

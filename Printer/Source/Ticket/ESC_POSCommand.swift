@@ -48,6 +48,9 @@ extension ESC_POSCommand {
     // Clears the data in the print buffer and resets the printer modes to the modes that were in effect when the power was turned on.
     static let initialize = ESC_POSCommand(rawValue: [27, 64])
     
+    // Clears style data in the buffer
+    static let resetStyle = ESC_POSCommand(rawValue: [27, 33, 0])
+    
     // Prints the data in the print buffer and feeds n lines.
     static func printAndFeed(lines: UInt8 = 1) -> ESC_POSCommand {
         return ESC_POSCommand([27, 100, lines])
