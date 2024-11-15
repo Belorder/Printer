@@ -2,46 +2,12 @@
 //  NetworkPrinterManager.swift
 //  Printer
 //
-//  Created by Geoffrey Desbrosses on 19/09/2024.
+//  Created by Geoffrey Desbrosses on 12/09/2024.
 //  Copyright © 2024 Belorder. All rights reserved.
 //
 import Foundation
 import Network
 import MobileCoreServices
-
-public enum TicketPrintError: Error {
-    case printError(NWError)
-    case connectionError(NWError)
-    case notConnected
-    case notReady
-    case port
-    case connectionTimeout
-    case connectionStateTimeout(state: NWConnection.State)
-    case unknownError
-}
-
-extension TicketPrintError: LocalizedError {
-    public var errorDescription: String? {
-        switch self {
-        case .printError(let nwError):
-            return "Network error \(nwError.localizedDescription)"
-        case .connectionError(let nwError):
-            return "Connection error \(nwError.localizedDescription)"
-        case .notConnected:
-            return "You are not connected to the printer"
-        case .notReady:
-            return "The printer is not ready"
-        case .port:
-            return "Invalid port"
-        case .connectionTimeout:
-            return "We can't connect to the printer"
-        case .connectionStateTimeout(let state):
-            return "Bad state after timeout: \(state)"
-        case .unknownError:
-            return "An unknown error has occurred"
-        }
-    }
-}
 
 @available(iOS 12.0, *)
 public class NetworkPrinterManager {
@@ -72,7 +38,7 @@ public class NetworkPrinterManager {
     /**
      * Async function to wait for the connection to be etablish
      */
-    public func waitForConnectionReady(timeout: TimeInterval = 2, completion: @escaping (Result<Bool, TicketPrintError>) -> Void) {
+    public func waitForConnectionReady(timeout: TimeInterval = 2, completion: @escaping (Result<Bool, PrinterError>) -> Void) {
         let startTime = Date()
 
         DispatchQueue.global().async {
@@ -121,7 +87,7 @@ public class NetworkPrinterManager {
      */
     private func initNewConnection(ip: String, port: Int) throws {
         guard let PORT = NWEndpoint.Port("\(port)") else {
-            throw TicketPrintError.port
+            throw PrinterError.port
         }
 
         let ipAddress = NWEndpoint.Host(ip)
@@ -159,19 +125,19 @@ public class NetworkPrinterManager {
      */
     public func print(_ ticket: Ticket, completion: @escaping (Bool, Error?) -> Void) {
         guard let connection = networkConnection else {
-            completion(false, TicketPrintError.notConnected)
+            completion(false, PrinterError.notConnected)
             return
         }
 
         if connection.state != .ready {
-            completion(false, TicketPrintError.notReady)
+            completion(false, PrinterError.notReady)
             return
         }
 
         let content = getTicketData(ticket)
         connection.send(content: content, isComplete: true, completion: NWConnection.SendCompletion.contentProcessed({ (nwError) in
             if let error = nwError {
-                completion(false, TicketPrintError.printError(error))
+                completion(false, PrinterError.printError(error))
             } else {
                 completion(true, nil)
             }

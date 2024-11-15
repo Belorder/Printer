@@ -1,11 +1,10 @@
 //
 //  Image.swift
-//  Ticket
+//  Printer
 //
-//  Created by gix on 2019/6/30.
-//  Copyright © 2019 gix. All rights reserved.
+//  Created by Geoffrey Desbrosses on 12/09/2024.
+//  Copyright © 2024 Belorder. All rights reserved.
 //
-
 import Foundation
 import CoreGraphics
 

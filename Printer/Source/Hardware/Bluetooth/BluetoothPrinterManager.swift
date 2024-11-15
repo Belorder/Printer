@@ -1,11 +1,10 @@
 //
-//  PrinterManager.swift
+//  BluetoothPrinterManager.swift
 //  Printer
 //
-//  Created by gix on 12/8/16.
-//  Copyright © 2016 Kevin. All rights reserved.
+//  Created by Geoffrey Desbrosses on 12/09/2024.
+//  Copyright © 2024 Belorder. All rights reserved.
 //
-
 import Foundation
 import CoreBluetooth
 
@@ -97,7 +96,7 @@ public class BluetoothPrinterManager {
 
     weak var delegate: PrinterManagerDelegate?
 
-    var errorReport: ((PError) -> ())?
+    var errorReport: ((PrinterError) -> ())?
 
     private var connectTimer: Timer?
 
@@ -189,13 +188,13 @@ public class BluetoothPrinterManager {
         }
     }
 
-    private func deliverError(_ error: PError) {
+    private func deliverError(_ error: PrinterError) {
         DispatchQueue.main.async { [weak self] in
             self?.errorReport?(error)
         }
     }
 
-    public func startScan() -> PError? {
+    public func startScan() -> PrinterError? {
 
         guard !centralManager.isScanning else {
             return nil
@@ -281,7 +280,7 @@ public class BluetoothPrinterManager {
         }
     }
 
-    public func print(_ content: ESCPOSCommandsCreator, encoding: String.Encoding = String.GBEncoding.GB_18030_2000, completeBlock: ((PError?) -> ())? = nil) {
+    public func print(_ content: ESCPOSCommandsCreator, encoding: String.Encoding = String.GBEncoding.GB_18030_2000, completeBlock: ((PrinterError?) -> ())? = nil) {
         
         guard let p = peripheralDelegate.writablePeripheral, let c = peripheralDelegate.writablecharacteristic else {
 

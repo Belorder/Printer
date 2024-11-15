@@ -1,10 +1,10 @@
-//  ImageBlock.swift
+//
+//  TicketImage.swift
 //  Printer
 //
-//  Created by Pradeep Sakharelia on 18/05/2019.
-//  Copyright © 2019 Quick Key Business Solutions. All rights reserved.
+//  Created by Geoffrey Desbrosses on 12/09/2024.
+//  Copyright © 2024 Belorder. All rights reserved.
 //
-
 import Foundation
 
 public struct TicketImage: BlockDataProvider {

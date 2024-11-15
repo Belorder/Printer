@@ -1,11 +1,10 @@
 //
-//  PrinterTableViewController.swift
+//  BluetoothPrinterSelectTableViewController.swift
 //  Printer
 //
-//  Created by gix on 12/8/16.
-//  Copyright © 2016 Kevin. All rights reserved.
+//  Created by Geoffrey Desbrosses on 12/09/2024.
+//  Copyright © 2024 Belorder. All rights reserved.
 //
-
 import UIKit
 
 public class BluetoothPrinterSelectTableViewController: UITableViewController {

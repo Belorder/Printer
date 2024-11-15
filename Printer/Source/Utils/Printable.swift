@@ -2,10 +2,9 @@
 //  Printable.swift
 //  Printer
 //
-//  Created by gix on 2019/7/29.
-//  Copyright © 2019 Kevin. All rights reserved.
+//  Created by Geoffrey Desbrosses on 12/09/2024.
+//  Copyright © 2024 Belorder. All rights reserved.
 //
-
 import Foundation
 
 public protocol ESCPOSCommandsCreator {
