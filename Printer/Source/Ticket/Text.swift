@@ -37,7 +37,6 @@ public extension Text {
     enum PredefinedAttribute: Attribute {
         
         public enum ScaleLevel: UInt8 {
-            
             case l0 = 0x00
             case l1 = 0x11
             case l2 = 0x22
@@ -50,23 +49,23 @@ public extension Text {
         }
         
         case alignment(NSTextAlignment)
-        case bold
-        case small
+        case bold // Boolean
+        case font(UInt8) // [0, 4]
         case light
         case scale(ScaleLevel)
         case feed(UInt8)
         case blackBg
         case whiteBg
         case custom(Array<UInt8>)
-        
+
         public var attribute: [UInt8] {
             switch self {
             case let .alignment(v):
                 return ESC_POSCommand.justification(v == .left ? 0 : v == .center ? 1 : 2).rawValue
             case .bold:
                 return ESC_POSCommand.emphasize(mode: true).rawValue
-            case .small:
-                return ESC_POSCommand.font(1).rawValue
+            case let .font(v):
+                return ESC_POSCommand.font(v).rawValue
             case .light:
                 return ESC_POSCommand.color(n: 1).rawValue
             case let .scale(v):
@@ -74,9 +73,9 @@ public extension Text {
             case let .feed(v):
                 return ESC_POSCommand.feed(points: v).rawValue
             case .blackBg:
-                return [29, 66, 1]
+                return ESC_POSCommand.whiteBlackReverse(mode: true).rawValue
             case .whiteBg:
-                return [29, 66, 0]
+                return ESC_POSCommand.whiteBlackReverse(mode: false).rawValue
             case let .custom(v):
                 return v
             }

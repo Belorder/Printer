@@ -33,8 +33,10 @@ public struct Dividing: BlockDataProvider {
         let num = printDensity / fontDensity
         
         let content = stride(from: 0, to: num, by: 1).map { String(provider.character(for: $0, total: num) ) }.joined()
+        var predefined: [Text.PredefinedAttribute] = []
+        predefined.append(.alignment(.left))
         
-        return Text(content).data(using: encoding)
+        return Text(content, attributes: predefined).data(using: encoding)
     }
 }
 
