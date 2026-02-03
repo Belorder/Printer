@@ -1,309 +1,641 @@
 //
-//  BluetoothPrinterManager.swift
+//  Block.swift
 //  Printer
 //
-//  Created by Geoffrey Desbrosses on 12/09/2024.
+//  Created by Geoffrey Desbrosses on 03/02/2026.
 //  Copyright © 2024 Belorder. All rights reserved.
 //
 import Foundation
 import CoreBluetooth
 
+// MARK: - String Encoding Extension
+
 public extension String {
     struct GBEncoding {
-        public static let GB_18030_2000 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+        public static let GB_18030_2000 = String.Encoding(
+            rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            )
+        )
     }
 }
 
-private extension CBPeripheral {
+// MARK: - Bluetooth Printer Model
 
-    var printerState: BluetoothPrinter.State {
-        switch state {
-        case .disconnected:
-            return .disconnected
-        case .connected:
-            return .connected
-        case .connecting:
-            return .connecting
-        case .disconnecting:
-            return .disconnecting
-        @unknown default:
-            return .disconnected
-        }
-    }
-}
+public struct BluetoothPrinter: Equatable {
 
-public struct BluetoothPrinter {
-
-    enum State {
-
+    public enum State {
         case disconnected
         case connecting
         case connected
         case disconnecting
     }
 
-    let name: String?
-    let identifier: UUID
+    public let name: String?
+    public let identifier: UUID
+    public var state: State
 
-    var state: State
-
-    var isConnecting: Bool {
+    public var isConnecting: Bool {
         return state == .connecting
     }
 
-    init(_ peripheral: CBPeripheral) {
-
+    init(peripheral: CBPeripheral, state: State = .disconnected) {
         self.name = peripheral.name
         self.identifier = peripheral.identifier
-        self.state = peripheral.printerState
+        self.state = state
     }
 
     public func getName() -> String? {
         return self.name
     }
-    
+
     public func getIdentifier() -> String {
         return self.identifier.uuidString
     }
+
+    public static func == (lhs: BluetoothPrinter, rhs: BluetoothPrinter) -> Bool {
+        return lhs.identifier == rhs.identifier
+    }
 }
+
+// MARK: - Nearby Printer Change
 
 public enum NearbyPrinterChange {
-
     case add(BluetoothPrinter)
     case update(BluetoothPrinter)
-    case remove(UUID) // identifier
+    case remove(UUID)
 }
 
-public protocol PrinterManagerDelegate: NSObjectProtocol {
+// MARK: - Printer Manager Delegate
 
+public protocol PrinterManagerDelegate: AnyObject {
     func nearbyPrinterDidChange(_ change: NearbyPrinterChange)
 }
 
-public extension BluetoothPrinterManager {
+// MARK: - Bluetooth Printer Manager
 
-    static var specifiedServices: Set<String> = ["E7810A71-73AE-499D-8C15-FAA9AEF0C3F2"]
-    static var specifiedCharacteristics: Set<String>?
-}
+public class BluetoothPrinterManager: NSObject {
 
-public class BluetoothPrinterManager {
+    // MARK: - Configuration
 
-    private let queue = DispatchQueue(label: "com.kevin.gong.printer")
+    /// Chunk size for BLE transmission (80 bytes is safe for most iOS devices)
+    private let chunkSize = 80
 
-    private let centralManager: CBCentralManager
+    /// Delay between chunks in seconds
+    private let chunkDelay: TimeInterval = 0.02
 
-    private let centralManagerDelegate = BluetoothCentralManagerDelegate(BluetoothPrinterManager.specifiedServices)
-    private let peripheralDelegate = BluetoothPeripheralDelegate(BluetoothPrinterManager.specifiedServices, characteristics: BluetoothPrinterManager.specifiedCharacteristics)
+    /// Connection timeout in seconds
+    private let connectionTimeout: TimeInterval = 15.0
 
-    weak var delegate: PrinterManagerDelegate?
+    /// Known printer service UUIDs
+    public static var specifiedServices: Set<String> = [
+        "E7810A71-73AE-499D-8C15-FAA9AEF0C3F2",
+        "49535343-FE7D-4AE5-8FA9-9FAFD205E455",
+        "18F0",
+        "FF00"
+    ]
 
-    var errorReport: ((PrinterError) -> ())?
+    /// Known printer characteristic UUIDs
+    public static var specifiedCharacteristics: Set<String>? = [
+        "BEF8D6C9-9C21-4C9E-B632-BD58C1009F9F",
+        "49535343-8841-43F4-A8D4-ECBE34729BB3",
+        "2AF1",
+        "FF02"
+    ]
 
-    private var connectTimer: Timer?
+    // MARK: - Properties
+
+    private var centralManager: CBCentralManager!
+    private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    private var connectedPeripheral: CBPeripheral?
+    private var writeCharacteristic: CBCharacteristic?
+    private var connectionTimer: Timer?
+
+    public weak var delegate: PrinterManagerDelegate?
+    public var errorReport: ((PrinterError) -> Void)?
+
+    /// Callbacks for connection events
+    public var onConnectionReady: ((BluetoothPrinter) -> Void)?
+    public var onConnectionLost: ((BluetoothPrinter?, PrinterError?) -> Void)?
+
+    /// Currently connected printer UUID
+    public private(set) var connectedPrinterUUID: UUID?
+
+    // Data sending state
+    private var dataQueue: [Data] = []
+    private var isSending = false
+    private var printCompletion: ((PrinterError?) -> Void)?
+
+    // MARK: - Computed Properties
 
     public var nearbyPrinters: [BluetoothPrinter] {
-        return centralManagerDelegate.discoveredPeripherals.values.map { BluetoothPrinter($0) }
-    }
-
-    public init(delegate: PrinterManagerDelegate? = nil) {
-
-        centralManager = CBCentralManager(delegate: centralManagerDelegate, queue: queue)
-
-        self.delegate = delegate
-
-        commonInit()
-    }
-
-    private func commonInit() {
-
-        peripheralDelegate.wellDoneCanWriteData = { [weak self] in
-
-            self?.connectTimer?.invalidate()
-            self?.connectTimer = nil
-
-            self?.nearbyPrinterDidChange(.update(BluetoothPrinter($0)))
-        }
-
-        centralManagerDelegate.peripheralDelegate = peripheralDelegate
-
-        centralManagerDelegate.addedPeripherals = { [weak self] in
-
-            guard let printer = (self?.centralManagerDelegate[$0].map { BluetoothPrinter($0) }) else {
-                return
+        return discoveredPeripherals.values.map { peripheral in
+            var state: BluetoothPrinter.State = .disconnected
+            if let connected = connectedPeripheral, connected.identifier == peripheral.identifier {
+                state = writeCharacteristic != nil ? .connected : .connecting
             }
-            self?.nearbyPrinterDidChange(.add(printer))
-        }
-
-        centralManagerDelegate.updatedPeripherals = { [weak self] in
-            guard let printer = (self?.centralManagerDelegate[$0].map { BluetoothPrinter($0) }) else {
-                return
-            }
-            self?.nearbyPrinterDidChange(.update(printer))
-        }
-
-        centralManagerDelegate.removedPeripherals = { [weak self] in
-            self?.nearbyPrinterDidChange(.remove($0))
-        }
-        
-        ///
-        centralManagerDelegate.centralManagerDidUpdateState = { [weak self] in
-            guard let `self` = self else {
-                return
-            }
-
-            guard $0.state == .poweredOn else {
-                return
-            }
-            if let error = self.startScan() {
-                self.errorReport?(error)
-            }
-        }
-
-        centralManagerDelegate.centralManagerDidDisConnectPeripheralWithError = { [weak self] _, peripheral, _ in
-
-            guard let `self` = self else {
-                return
-            }
-
-            self.nearbyPrinterDidChange(.update(BluetoothPrinter(peripheral)))
-            self.peripheralDelegate.disconnect(peripheral)
-        }
-
-        centralManagerDelegate.centralManagerDidFailToConnectPeripheralWithError = { [weak self] _, _, err in
-
-            guard let `self` = self else {
-                return
-            }
-
-            if let error = err {
-                debugPrint(error.localizedDescription)
-            }
-
-            self.errorReport?(.connectFailed)
-        }
-    }
-
-    private func nearbyPrinterDidChange(_ change: NearbyPrinterChange) {
-        DispatchQueue.main.async { [weak self] in
-            self?.delegate?.nearbyPrinterDidChange(change)
-        }
-    }
-
-    private func deliverError(_ error: PrinterError) {
-        DispatchQueue.main.async { [weak self] in
-            self?.errorReport?(error)
-        }
-    }
-
-    public func startScan() -> PrinterError? {
-
-        guard !centralManager.isScanning else {
-            return nil
-        }
-
-        guard centralManager.state == .poweredOn else {
-            return .deviceNotReady
-        }
-
-        centralManager.scanForPeripherals(withServices: nil, options: nil)
-
-        return nil
-    }
-
-    public func stopScan() {
-
-        centralManager.stopScan()
-    }
-
-    public func connect(_ printer: BluetoothPrinter) {
-
-        guard let per = centralManagerDelegate[printer.identifier] else {
-
-            return
-        }
-
-        var p = printer
-        p.state = .connecting
-        nearbyPrinterDidChange(.update(p))
-
-        if let t = connectTimer {
-            t.invalidate()
-        }
-        connectTimer = Timer(timeInterval: 15, target: self, selector: #selector(connectTimeout(_:)), userInfo: p.identifier, repeats: false)
-        RunLoop.main.add(connectTimer!, forMode: .default)
-
-        centralManager.connect(per, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
-    }
-
-    @objc private func connectTimeout(_ timer: Timer) {
-
-        guard let uuid = (timer.userInfo as? UUID), let p = centralManagerDelegate[uuid] else {
-            return
-        }
-
-        var printer = BluetoothPrinter(p)
-        printer.state = .disconnected
-        nearbyPrinterDidChange(.update(printer))
-
-        centralManager.cancelPeripheralConnection(p)
-
-        connectTimer?.invalidate()
-        connectTimer = nil
-    }
-
-    public func disconnect(_ printer: BluetoothPrinter) {
-
-        guard let per = centralManagerDelegate[printer.identifier] else {
-            return
-        }
-
-        var p = printer
-        p.state = .disconnecting
-        nearbyPrinterDidChange(.update(p))
-
-        centralManager.cancelPeripheralConnection(per)
-    }
-
-    public func disconnectAllPrinter() {
-
-        let serviceUUIDs = BluetoothPrinterManager.specifiedServices.map { CBUUID(string: $0) }
-        
-        centralManager.retrieveConnectedPeripherals(withServices: serviceUUIDs).forEach {
-            centralManager.cancelPeripheralConnection($0)
+            return BluetoothPrinter(peripheral: peripheral, state: state)
         }
     }
 
     public var canPrint: Bool {
-        if peripheralDelegate.writablecharacteristic == nil || peripheralDelegate.writablePeripheral == nil {
-            return false
-        } else {
-            return true
-        }
+        return connectedPeripheral != nil && writeCharacteristic != nil
     }
 
-    public func print(_ content: ESCPOSCommandsCreator, encoding: String.Encoding = String.GBEncoding.GB_18030_2000, completeBlock: ((PrinterError?) -> ())? = nil) {
-        
-        guard let p = peripheralDelegate.writablePeripheral, let c = peripheralDelegate.writablecharacteristic else {
+    // MARK: - Initialization
 
+    public override init() {
+        super.init()
+        centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.main)
+        debugPrint("[BluetoothPrinterManager] Initialized")
+    }
+
+    public init(delegate: PrinterManagerDelegate?) {
+        super.init()
+        self.delegate = delegate
+        centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.main)
+        debugPrint("[BluetoothPrinterManager] Initialized with delegate")
+    }
+
+    deinit {
+        connectionTimer?.invalidate()
+        disconnectAllPrinter()
+    }
+
+    // MARK: - Public Methods
+
+    /// Start scanning for nearby printers
+    public func startScan() -> PrinterError? {
+        guard centralManager.state == .poweredOn else {
+            debugPrint("[BluetoothPrinterManager] Cannot scan - Bluetooth not ready")
+            return .deviceNotReady
+        }
+
+        guard !centralManager.isScanning else {
+            debugPrint("[BluetoothPrinterManager] Already scanning")
+            return nil
+        }
+
+        discoveredPeripherals.removeAll()
+
+        // Scan for all devices to find printers
+        centralManager.scanForPeripherals(withServices: nil, options: [
+            CBCentralManagerScanOptionAllowDuplicatesKey: false
+        ])
+
+        debugPrint("[BluetoothPrinterManager] Started scanning")
+        return nil
+    }
+
+    /// Stop scanning
+    public func stopScan() {
+        centralManager.stopScan()
+        debugPrint("[BluetoothPrinterManager] Stopped scanning")
+    }
+
+    /// Check if a specific printer is connected and ready
+    public func isConnectedAndReady(uuid: UUID) -> Bool {
+        guard canPrint else { return false }
+        return connectedPrinterUUID == uuid
+    }
+
+    /// Get printer by UUID
+    public func getPrinter(uuid: UUID) -> BluetoothPrinter? {
+        guard let peripheral = discoveredPeripherals[uuid] else { return nil }
+        return BluetoothPrinter(peripheral: peripheral)
+    }
+
+    /// Connect to a printer
+    public func connect(_ printer: BluetoothPrinter) {
+        guard let peripheral = discoveredPeripherals[printer.identifier] else {
+            debugPrint("[BluetoothPrinterManager] Printer not found: \(printer.identifier)")
+            return
+        }
+
+        // Disconnect from current if different
+        if let current = connectedPeripheral, current.identifier != peripheral.identifier {
+            disconnect(BluetoothPrinter(peripheral: current))
+        }
+
+        debugPrint("[BluetoothPrinterManager] Connecting to: \(printer.name ?? "Unknown")")
+
+        // Update state
+        var updatedPrinter = printer
+        updatedPrinter.state = .connecting
+        notifyChange(.update(updatedPrinter))
+
+        // Start connection timeout
+        startConnectionTimeout(for: printer.identifier)
+
+        // Connect
+        connectedPeripheral = peripheral
+        peripheral.delegate = self
+        centralManager.connect(peripheral, options: [
+            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
+        ])
+    }
+
+    /// Connect with completion callback
+    public func connect(_ printer: BluetoothPrinter, completion: @escaping (Bool, PrinterError?) -> Void) {
+        // If already connected and ready, return immediately
+        if isConnectedAndReady(uuid: printer.identifier) {
+            completion(true, nil)
+            return
+        }
+
+        // Store completion for later
+        var didComplete = false
+        let previousOnReady = onConnectionReady
+        let previousOnLost = onConnectionLost
+
+        onConnectionReady = { [weak self] connectedPrinter in
+            previousOnReady?(connectedPrinter)
+            guard !didComplete, connectedPrinter.identifier == printer.identifier else { return }
+            didComplete = true
+            self?.onConnectionReady = previousOnReady
+            self?.onConnectionLost = previousOnLost
+            completion(true, nil)
+        }
+
+        onConnectionLost = { [weak self] disconnectedPrinter, error in
+            previousOnLost?(disconnectedPrinter, error)
+            guard !didComplete else { return }
+            if disconnectedPrinter?.identifier == printer.identifier || disconnectedPrinter == nil {
+                didComplete = true
+                self?.onConnectionReady = previousOnReady
+                self?.onConnectionLost = previousOnLost
+                completion(false, error ?? .connectFailed)
+            }
+        }
+
+        connect(printer)
+    }
+
+    /// Disconnect from a printer
+    public func disconnect(_ printer: BluetoothPrinter) {
+        guard let peripheral = discoveredPeripherals[printer.identifier] else { return }
+
+        debugPrint("[BluetoothPrinterManager] Disconnecting from: \(printer.name ?? "Unknown")")
+
+        var updatedPrinter = printer
+        updatedPrinter.state = .disconnecting
+        notifyChange(.update(updatedPrinter))
+
+        centralManager.cancelPeripheralConnection(peripheral)
+    }
+
+    /// Disconnect from all printers
+    public func disconnectAllPrinter() {
+        for peripheral in discoveredPeripherals.values {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+        cleanup()
+    }
+
+    /// Print ESC/POS content (requires already connected)
+    public func print(_ content: ESCPOSCommandsCreator, encoding: String.Encoding = .utf8, completeBlock: ((PrinterError?) -> Void)? = nil) {
+
+        guard canPrint else {
+            debugPrint("[BluetoothPrinterManager] Cannot print - not ready")
             completeBlock?(.deviceNotReady)
             return
         }
 
-        for data in content.data(using: encoding) {
+        // Get data from content
+        let dataChunks = content.data(using: encoding)
 
-            p.writeValue(data, for: c, type: .withResponse)
+        // Combine all data
+        var allData = Data()
+        for chunk in dataChunks {
+            allData.append(chunk)
         }
 
-        // Cut the paper after printing
+        // Add paper cut command
         let paperCutCommand: [UInt8] = [0x1D, 0x56, 0x00]
-        p.writeValue(Data(paperCutCommand), for: c, type: .withResponse)
-        
-        completeBlock?(nil)
+        allData.append(Data(paperCutCommand))
+
+        debugPrint("[BluetoothPrinterManager] Printing \(allData.count) bytes")
+
+        // Print the data
+        printData(allData, completion: completeBlock)
     }
 
-    deinit {
-        connectTimer?.invalidate()
-        connectTimer = nil
+    // MARK: - High-Level Print API
 
-        disconnectAllPrinter()
+    /// Print to a specific printer by UUID - handles connection automatically
+    /// This is the main method to use for printing
+    public func printToDevice(
+        uuid: String,
+        content: ESCPOSCommandsCreator,
+        encoding: String.Encoding = .utf8,
+        completion: @escaping (PrinterError?) -> Void
+    ) {
+        guard let printerUUID = UUID(uuidString: uuid) else {
+            debugPrint("[BluetoothPrinterManager] Invalid UUID: \(uuid)")
+            completion(.deviceNotReady)
+            return
+        }
+
+        debugPrint("[BluetoothPrinterManager] printToDevice: \(uuid)")
+
+        // Already connected to this printer?
+        if isConnectedAndReady(uuid: printerUUID) {
+            debugPrint("[BluetoothPrinterManager] Already connected, printing directly")
+            print(content, encoding: encoding, completeBlock: completion)
+            return
+        }
+
+        // Find the printer
+        guard let printer = getPrinter(uuid: printerUUID) else {
+            debugPrint("[BluetoothPrinterManager] Printer not found: \(uuid)")
+            completion(.deviceNotReady)
+            return
+        }
+
+        debugPrint("[BluetoothPrinterManager] Connecting to printer...")
+
+        // Connect then print
+        connect(printer) { [weak self] success, error in
+            if success {
+                debugPrint("[BluetoothPrinterManager] Connected, now printing...")
+                self?.print(content, encoding: encoding, completeBlock: completion)
+            } else {
+                debugPrint("[BluetoothPrinterManager] Connection failed: \(error?.errorDescription ?? "unknown")")
+                completion(error ?? .connectFailed)
+            }
+        }
+    }
+
+    /// Scan for printers and return results after specified duration
+    public func scanForPrinters(duration: TimeInterval = 5.0, completion: @escaping ([BluetoothPrinter]) -> Void) {
+        debugPrint("[BluetoothPrinterManager] Scanning for \(duration) seconds...")
+
+        _ = startScan()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            self?.stopScan()
+            let printers = self?.nearbyPrinters ?? []
+            debugPrint("[BluetoothPrinterManager] Found \(printers.count) printers")
+            completion(printers)
+        }
+    }
+
+    /// Print raw data
+    public func printData(_ data: Data, completion: ((PrinterError?) -> Void)? = nil) {
+        guard canPrint else {
+            debugPrint("[BluetoothPrinterManager] Cannot print - not ready")
+            completion?(.deviceNotReady)
+            return
+        }
+
+        // Split into BLE-sized chunks
+        dataQueue = splitIntoChunks(data)
+        printCompletion = completion
+
+        debugPrint("[BluetoothPrinterManager] Split into \(dataQueue.count) chunks of max \(chunkSize) bytes")
+
+        // Start sending
+        sendNextChunk()
+    }
+
+    // MARK: - Private Methods
+
+    private func cleanup() {
+        connectionTimer?.invalidate()
+        connectionTimer = nil
+        connectedPeripheral = nil
+        writeCharacteristic = nil
+        connectedPrinterUUID = nil
+        dataQueue.removeAll()
+        isSending = false
+    }
+
+    private func startConnectionTimeout(for uuid: UUID) {
+        connectionTimer?.invalidate()
+        connectionTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
+            self?.handleConnectionTimeout(uuid: uuid)
+        }
+    }
+
+    private func handleConnectionTimeout(uuid: UUID) {
+        debugPrint("[BluetoothPrinterManager] Connection timeout for: \(uuid)")
+
+        if let peripheral = discoveredPeripherals[uuid] {
+            centralManager.cancelPeripheralConnection(peripheral)
+
+            var printer = BluetoothPrinter(peripheral: peripheral)
+            printer.state = .disconnected
+            notifyChange(.update(printer))
+        }
+
+        cleanup()
+        errorReport?(.connectFailed)
+        onConnectionLost?(nil, .connectFailed)
+    }
+
+    private func splitIntoChunks(_ data: Data) -> [Data] {
+        var chunks: [Data] = []
+        var offset = 0
+
+        while offset < data.count {
+            let length = min(chunkSize, data.count - offset)
+            let chunk = data.subdata(in: offset..<(offset + length))
+            chunks.append(chunk)
+            offset += length
+        }
+
+        return chunks
+    }
+
+    private func sendNextChunk() {
+        guard !dataQueue.isEmpty else {
+            debugPrint("[BluetoothPrinterManager] All chunks sent")
+            isSending = false
+            printCompletion?(nil)
+            printCompletion = nil
+            return
+        }
+
+        guard let peripheral = connectedPeripheral, let characteristic = writeCharacteristic else {
+            debugPrint("[BluetoothPrinterManager] Disconnected during print")
+            isSending = false
+            printCompletion?(.deviceNotReady)
+            printCompletion = nil
+            return
+        }
+
+        isSending = true
+        let chunk = dataQueue.removeFirst()
+
+        // Determine write type
+        let writeType: CBCharacteristicWriteType =
+            characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+
+        peripheral.writeValue(chunk, for: characteristic, type: writeType)
+
+        // If using writeWithoutResponse, manually pace with delay
+        if writeType == .withoutResponse {
+            DispatchQueue.main.asyncAfter(deadline: .now() + chunkDelay) { [weak self] in
+                self?.sendNextChunk()
+            }
+        }
+        // For .withResponse, sendNextChunk is called from didWriteValueFor
+    }
+
+    private func notifyChange(_ change: NearbyPrinterChange) {
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.nearbyPrinterDidChange(change)
+        }
+    }
+}
+
+// MARK: - CBCentralManagerDelegate
+
+extension BluetoothPrinterManager: CBCentralManagerDelegate {
+
+    public func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        debugPrint("[BluetoothPrinterManager] Bluetooth state: \(central.state.rawValue)")
+
+        if central.state == .poweredOn {
+            // Auto-start scan when Bluetooth is ready
+            _ = startScan()
+        } else if central.state == .poweredOff {
+            cleanup()
+        }
+    }
+
+    public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                               advertisementData: [String: Any], rssi RSSI: NSNumber) {
+
+        // Filter devices without names
+        guard let name = peripheral.name, !name.isEmpty else { return }
+
+        // Check if already discovered
+        let isNew = discoveredPeripherals[peripheral.identifier] == nil
+
+        // Store peripheral
+        discoveredPeripherals[peripheral.identifier] = peripheral
+
+        // Notify delegate
+        let printer = BluetoothPrinter(peripheral: peripheral)
+        if isNew {
+            debugPrint("[BluetoothPrinterManager] Discovered: \(name) (\(peripheral.identifier))")
+            notifyChange(.add(printer))
+        } else {
+            notifyChange(.update(printer))
+        }
+    }
+
+    public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        debugPrint("[BluetoothPrinterManager] Connected to: \(peripheral.name ?? "Unknown")")
+
+        connectionTimer?.invalidate()
+        connectionTimer = nil
+
+        peripheral.delegate = self
+        peripheral.discoverServices(nil)
+    }
+
+    public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        debugPrint("[BluetoothPrinterManager] Failed to connect: \(error?.localizedDescription ?? "Unknown")")
+
+        connectionTimer?.invalidate()
+        connectionTimer = nil
+
+        var printer = BluetoothPrinter(peripheral: peripheral)
+        printer.state = .disconnected
+        notifyChange(.update(printer))
+
+        cleanup()
+        errorReport?(.connectFailed)
+        onConnectionLost?(printer, .connectFailed)
+    }
+
+    public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        debugPrint("[BluetoothPrinterManager] Disconnected from: \(peripheral.name ?? "Unknown")")
+
+        var printer = BluetoothPrinter(peripheral: peripheral)
+        printer.state = .disconnected
+        notifyChange(.update(printer))
+
+        let wasConnected = connectedPrinterUUID == peripheral.identifier
+        cleanup()
+
+        if wasConnected {
+            onConnectionLost?(printer, error != nil ? .connectFailed : nil)
+        }
+    }
+}
+
+// MARK: - CBPeripheralDelegate
+
+extension BluetoothPrinterManager: CBPeripheralDelegate {
+
+    public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard error == nil, let services = peripheral.services else {
+            debugPrint("[BluetoothPrinterManager] Service discovery error: \(error?.localizedDescription ?? "No services")")
+            return
+        }
+
+        debugPrint("[BluetoothPrinterManager] Found \(services.count) services")
+
+        for service in services {
+            debugPrint("[BluetoothPrinterManager] Service: \(service.uuid.uuidString)")
+            peripheral.discoverCharacteristics(nil, for: service)
+        }
+    }
+
+    public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard error == nil, let characteristics = service.characteristics else { return }
+
+        for characteristic in characteristics {
+            debugPrint("[BluetoothPrinterManager] Characteristic: \(characteristic.uuid.uuidString) - Props: \(characteristic.properties.rawValue)")
+
+            // Look for writable characteristic
+            if characteristic.properties.contains(.write) || characteristic.properties.contains(.writeWithoutResponse) {
+
+                let isKnown = BluetoothPrinterManager.specifiedCharacteristics?.contains(characteristic.uuid.uuidString) ?? false
+                let serviceIsKnown = BluetoothPrinterManager.specifiedServices.contains(service.uuid.uuidString)
+
+                if isKnown || serviceIsKnown || writeCharacteristic == nil {
+                    writeCharacteristic = characteristic
+                    connectedPrinterUUID = peripheral.identifier
+
+                    debugPrint("[BluetoothPrinterManager] Write characteristic found: \(characteristic.uuid.uuidString)")
+
+                    // Notify that printer is ready
+                    var printer = BluetoothPrinter(peripheral: peripheral)
+                    printer.state = .connected
+                    notifyChange(.update(printer))
+
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onConnectionReady?(printer)
+                    }
+                }
+            }
+        }
+    }
+
+    public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            debugPrint("[BluetoothPrinterManager] Write error: \(error.localizedDescription)")
+            dataQueue.removeAll()
+            isSending = false
+            printCompletion?(.unknownError)
+            printCompletion = nil
+            return
+        }
+
+        // Continue with next chunk after small delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + chunkDelay) { [weak self] in
+            self?.sendNextChunk()
+        }
+    }
+
+    public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        // Handle notifications from printer if needed
+        if let value = characteristic.value {
+            debugPrint("[BluetoothPrinterManager] Received: \(value.count) bytes")
+        }
     }
 }
