@@ -54,14 +54,14 @@ public struct BluetoothPrinter: Equatable {
         } else if !peripheralName.isEmpty {
             self.name = peripheralName
         } else {
-            self.name = "N/A" + " - \(peripheral.identifier)"
+            self.name = "N/A" + " (\(peripheral.identifier))"
         }
         self.identifier = peripheral.identifier
         self.state = state
     }
 
     public func getName() -> String {
-        return self.name ?? "N/A" + " - \(self.identifier)"
+        return self.name ?? "N/A" + " (\(self.identifier))"
     }
 
     public func getIdentifier() -> String {
@@ -93,14 +93,18 @@ public class BluetoothPrinterManager: NSObject {
 
     // MARK: - Configuration
 
-    /// Chunk size for BLE transmission (80 bytes is safe for most iOS devices)
-    private let chunkSize = 80
+    /// Chunk size for BLE transmission (20 bytes = default BLE MTU - 3 bytes header)
+    /// Smaller chunks = more reliable but slower
+    public var chunkSize: Int = 20
 
-    /// Delay between chunks in seconds
-    private let chunkDelay: TimeInterval = 0.02
+    /// Delay between chunks in seconds (increase if printing is choppy)
+    public var chunkDelay: TimeInterval = 0.05
 
     /// Connection timeout in seconds
     private let connectionTimeout: TimeInterval = 15.0
+
+    /// Force write with response for better flow control (recommended for printers)
+    public var forceWriteWithResponse: Bool = true
 
     /// Known printer service UUIDs
     public static var specifiedServices: Set<String> = [
@@ -111,8 +115,14 @@ public class BluetoothPrinterManager: NSObject {
         "FF00",
         // Star Micronics printers
         "00001101-0000-1000-8000-00805F9B34FB",  // SPP UUID
-        // Epson printers
+        // Epson printers (TM series BLE)
         "00000001-0000-1000-8000-00805F9B34FB",
+        "000018F0-0000-1000-8000-00805F9B34FB",
+        "48454C50-4F4E-4543-4F4E-4E4543540000",  // Epson Connect
+        "0A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D",  // Epson proprietary
+        // AURES printers
+        "0000180F-0000-1000-8000-00805F9B34FB",  // Battery service (common)
+        "0000180A-0000-1000-8000-00805F9B34FB",  // Device info
         // Citizen printers
         "A2F80000-1111-2222-3333-444455556666",
         // Brother printers
@@ -120,7 +130,9 @@ public class BluetoothPrinterManager: NSObject {
         // Generic BLE printers
         "FFF0",
         "FFE0",
-        "FEE0"
+        "FEE0",
+        "1800",  // Generic Access
+        "1801"   // Generic Attribute
     ]
 
     /// Known printer characteristic UUIDs
@@ -236,6 +248,21 @@ public class BluetoothPrinterManager: NSObject {
         discoveredPeripherals.removeAll()
         advertisedNames.removeAll()
         knownServiceDevices.removeAll()
+
+        // First, retrieve already connected peripherals (they don't appear in scan)
+        let serviceUUIDs = BluetoothPrinterManager.specifiedServices.compactMap { CBUUID(string: $0) }
+        let connectedPeripherals = centralManager.retrieveConnectedPeripherals(withServices: serviceUUIDs)
+        for peripheral in connectedPeripherals {
+            discoveredPeripherals[peripheral.identifier] = peripheral
+            knownServiceDevices.insert(peripheral.identifier)
+            debugPrint("[BluetoothPrinterManager] Found already connected: \(peripheral.name ?? "Unknown") (\(peripheral.identifier))")
+        }
+
+        // Also include our currently connected peripheral if any
+        if let currentPeripheral = connectedPeripheral {
+            discoveredPeripherals[currentPeripheral.identifier] = currentPeripheral
+            debugPrint("[BluetoothPrinterManager] Added current connection: \(currentPeripheral.name ?? "Unknown")")
+        }
 
         // Scan for all devices to find printers
         centralManager.scanForPeripherals(withServices: nil, options: [
@@ -540,9 +567,15 @@ public class BluetoothPrinterManager: NSObject {
         isSending = true
         let chunk = dataQueue.removeFirst()
 
-        // Determine write type
-        let writeType: CBCharacteristicWriteType =
-            characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+        // Determine write type - prefer withResponse for better flow control with printers
+        let writeType: CBCharacteristicWriteType
+        if forceWriteWithResponse && characteristic.properties.contains(.write) {
+            writeType = .withResponse
+        } else if characteristic.properties.contains(.writeWithoutResponse) {
+            writeType = .withoutResponse
+        } else {
+            writeType = .withResponse
+        }
 
         peripheral.writeValue(chunk, for: characteristic, type: writeType)
 
@@ -605,8 +638,8 @@ extension BluetoothPrinterManager: CBCentralManagerDelegate {
         // Notify delegate - use localName from advertisement if available
         let printer = BluetoothPrinter(peripheral: peripheral, advertisedName: advertisedNames[peripheral.identifier])
         if isNew {
-            let serviceSuffix = hasKnownService ? " [Printer Service]" : ""
-            debugPrint("[BluetoothPrinterManager] Discovered: \(displayName.isEmpty ? "Unknown" : displayName)\(serviceSuffix) (\(peripheral.identifier))")
+            debugPrint("[BluetoothPrinterManager] Discovered: \(displayName.isEmpty ? "N/A" : displayName) (\(peripheral.identifier))")
+
             notifyChange(.add(printer))
         } else {
             notifyChange(.update(printer))
