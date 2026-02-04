@@ -404,8 +404,22 @@ public class BluetoothPrinterManager: NSObject {
             return
         }
 
-        // Find the printer
-        guard let printer = getPrinter(uuid: printerUUID) else {
+        // Try to find the printer in discovered peripherals first
+        var printer = getPrinter(uuid: printerUUID)
+
+        // If not found in discovered, try to retrieve it directly by UUID
+        // This works for previously paired/connected devices without needing a scan
+        if printer == nil {
+            debugPrint("[BluetoothPrinterManager] Printer not in discovered list, trying to retrieve by UUID...")
+            if let peripheral = centralManager.retrievePeripherals(withIdentifiers: [printerUUID]).first {
+                // Add to discovered peripherals for future use
+                discoveredPeripherals[printerUUID] = peripheral
+                printer = BluetoothPrinter(peripheral: peripheral, advertisedName: nil)
+                debugPrint("[BluetoothPrinterManager] Retrieved peripheral: \(peripheral.name ?? "Unknown")")
+            }
+        }
+
+        guard let printer = printer else {
             debugPrint("[BluetoothPrinterManager] Printer not found: \(uuid)")
             completion(.deviceNotReady)
             return
@@ -555,10 +569,7 @@ extension BluetoothPrinterManager: CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         debugPrint("[BluetoothPrinterManager] Bluetooth state: \(central.state.rawValue)")
 
-        if central.state == .poweredOn {
-            // Auto-start scan when Bluetooth is ready
-            _ = startScan()
-        } else if central.state == .poweredOff {
+        if central.state == .poweredOff {
             cleanup()
         }
     }
