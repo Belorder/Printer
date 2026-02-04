@@ -93,7 +93,7 @@ public class BluetoothPrinterManager: NSObject {
 
     // MARK: - Configuration
 
-    /// Chunk size for BLE transmission (20 bytes = default BLE MTU - 3 bytes header)
+    /// Chunk size for BLE transmission - will be auto-adjusted based on MTU if autoAdjustChunkSize is true
     /// Smaller chunks = more reliable but slower
     public var chunkSize: Int = 20
 
@@ -105,6 +105,12 @@ public class BluetoothPrinterManager: NSObject {
 
     /// Force write with response for better flow control (recommended for printers)
     public var forceWriteWithResponse: Bool = true
+
+    /// Automatically adjust chunkSize based on negotiated MTU
+    public var autoAdjustChunkSize: Bool = true
+
+    /// Current negotiated MTU (read-only)
+    public private(set) var currentMTU: Int = 20
 
     /// Known printer service UUIDs
     public static var specifiedServices: Set<String> = [
@@ -258,8 +264,8 @@ public class BluetoothPrinterManager: NSObject {
             debugPrint("[BluetoothPrinterManager] Found already connected: \(peripheral.name ?? "Unknown") (\(peripheral.identifier))")
         }
 
-        // Also include our currently connected peripheral if any
-        if let currentPeripheral = connectedPeripheral {
+        // Also include our currently connected peripheral if actually connected
+        if let currentPeripheral = connectedPeripheral, currentPeripheral.state == .connected {
             discoveredPeripherals[currentPeripheral.identifier] = currentPeripheral
             debugPrint("[BluetoothPrinterManager] Added current connection: \(currentPeripheral.name ?? "Unknown")")
         }
@@ -639,7 +645,6 @@ extension BluetoothPrinterManager: CBCentralManagerDelegate {
         let printer = BluetoothPrinter(peripheral: peripheral, advertisedName: advertisedNames[peripheral.identifier])
         if isNew {
             debugPrint("[BluetoothPrinterManager] Discovered: \(displayName.isEmpty ? "N/A" : displayName) (\(peripheral.identifier))")
-
             notifyChange(.add(printer))
         } else {
             notifyChange(.update(printer))
@@ -717,11 +722,29 @@ extension BluetoothPrinterManager: CBPeripheralDelegate {
                 let isKnown = BluetoothPrinterManager.specifiedCharacteristics?.contains(characteristic.uuid.uuidString) ?? false
                 let serviceIsKnown = BluetoothPrinterManager.specifiedServices.contains(service.uuid.uuidString)
 
-                if isKnown || serviceIsKnown || writeCharacteristic == nil {
+                // Only set writeCharacteristic if we don't have one yet
+                // Don't change characteristic while printing or if already set
+                let shouldUseThisCharacteristic = writeCharacteristic == nil ||
+                    (isKnown && !BluetoothPrinterManager.specifiedCharacteristics!.contains(writeCharacteristic!.uuid.uuidString))
+
+                if shouldUseThisCharacteristic && !isSending {
                     writeCharacteristic = characteristic
                     connectedPrinterUUID = peripheral.identifier
 
                     debugPrint("[BluetoothPrinterManager] Write characteristic found: \(characteristic.uuid.uuidString)")
+
+                    // Get negotiated MTU and adjust chunk size
+                    let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+                    let mtu = peripheral.maximumWriteValueLength(for: writeType)
+                    currentMTU = mtu
+                    debugPrint("[BluetoothPrinterManager] Negotiated MTU: \(mtu) bytes")
+
+                    if autoAdjustChunkSize && mtu > 0 {
+                        // Use MTU minus a small margin for safety
+                        // Cap at 180 bytes max - larger chunks can cause issues with some printers
+                        chunkSize = min(180, max(20, mtu - 3))
+                        debugPrint("[BluetoothPrinterManager] Auto-adjusted chunkSize to: \(chunkSize) bytes (MTU: \(mtu))")
+                    }
 
                     // Notify that printer is ready
                     var printer = BluetoothPrinter(peripheral: peripheral)
@@ -731,6 +754,8 @@ extension BluetoothPrinterManager: CBPeripheralDelegate {
                     DispatchQueue.main.async { [weak self] in
                         self?.onConnectionReady?(printer)
                     }
+                } else {
+                    debugPrint("[BluetoothPrinterManager] Skipping characteristic \(characteristic.uuid.uuidString) - already have one or printing in progress")
                 }
             }
         }
