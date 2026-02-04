@@ -45,8 +45,23 @@ public struct BluetoothPrinter: Equatable {
         self.state = state
     }
 
-    public func getName() -> String? {
-        return self.name
+    init(peripheral: CBPeripheral, advertisedName: String?, state: State = .disconnected) {
+        // Prefer advertised name (localName) over peripheral.name, fallback to "N/A"
+        let peripheralName = peripheral.name ?? ""
+        let advName = advertisedName ?? ""
+        if !advName.isEmpty {
+            self.name = advName
+        } else if !peripheralName.isEmpty {
+            self.name = peripheralName
+        } else {
+            self.name = "N/A" + " - \(peripheral.identifier)"
+        }
+        self.identifier = peripheral.identifier
+        self.state = state
+    }
+
+    public func getName() -> String {
+        return self.name ?? "N/A" + " - \(self.identifier)"
     }
 
     public func getIdentifier() -> String {
@@ -89,10 +104,23 @@ public class BluetoothPrinterManager: NSObject {
 
     /// Known printer service UUIDs
     public static var specifiedServices: Set<String> = [
+        // Generic printer services
         "E7810A71-73AE-499D-8C15-FAA9AEF0C3F2",
         "49535343-FE7D-4AE5-8FA9-9FAFD205E455",
         "18F0",
-        "FF00"
+        "FF00",
+        // Star Micronics printers
+        "00001101-0000-1000-8000-00805F9B34FB",  // SPP UUID
+        // Epson printers
+        "00000001-0000-1000-8000-00805F9B34FB",
+        // Citizen printers
+        "A2F80000-1111-2222-3333-444455556666",
+        // Brother printers
+        "1820",
+        // Generic BLE printers
+        "FFF0",
+        "FFE0",
+        "FEE0"
     ]
 
     /// Known printer characteristic UUIDs
@@ -100,13 +128,23 @@ public class BluetoothPrinterManager: NSObject {
         "BEF8D6C9-9C21-4C9E-B632-BD58C1009F9F",
         "49535343-8841-43F4-A8D4-ECBE34729BB3",
         "2AF1",
-        "FF02"
+        "FF02",
+        // Additional common printer characteristics
+        "FFF1",
+        "FFF2",
+        "FFE1",
+        "FFE2",
+        "FEE1",
+        "1823",  // Brother
+        "00002AF1-0000-1000-8000-00805F9B34FB"
     ]
 
     // MARK: - Properties
 
     private var centralManager: CBCentralManager!
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    private var advertisedNames: [UUID: String] = [:]  // Cache for advertised names (localName)
+    private var knownServiceDevices: Set<UUID> = []  // Devices that advertise known printer services
     private var connectedPeripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
     private var connectionTimer: Timer?
@@ -129,13 +167,32 @@ public class BluetoothPrinterManager: NSObject {
     // MARK: - Computed Properties
 
     public var nearbyPrinters: [BluetoothPrinter] {
-        return discoveredPeripherals.values.map { peripheral in
-            var state: BluetoothPrinter.State = .disconnected
-            if let connected = connectedPeripheral, connected.identifier == peripheral.identifier {
-                state = writeCharacteristic != nil ? .connected : .connecting
+        return discoveredPeripherals.values
+            .map { peripheral -> BluetoothPrinter in
+                var state: BluetoothPrinter.State = .disconnected
+                if let connected = connectedPeripheral, connected.identifier == peripheral.identifier {
+                    state = writeCharacteristic != nil ? .connected : .connecting
+                }
+                let advertisedName = advertisedNames[peripheral.identifier]
+                return BluetoothPrinter(peripheral: peripheral, advertisedName: advertisedName, state: state)
             }
-            return BluetoothPrinter(peripheral: peripheral, state: state)
-        }
+            .sorted { printer1, printer2 in
+                // Sort priority:
+                // 0: Has name + known service
+                // 1: Has name + no known service
+                // 2: No name + known service
+                // 3: No name + no known service
+                func priority(_ printer: BluetoothPrinter) -> Int {
+                    let hasName = printer.name != nil && !printer.name!.hasPrefix("N/A")
+                    let hasKnownService = knownServiceDevices.contains(printer.identifier)
+
+                    if hasName && hasKnownService { return 0 }
+                    if hasName && !hasKnownService { return 1 }
+                    if !hasName && hasKnownService { return 2 }
+                    return 3
+                }
+                return priority(printer1) < priority(printer2)
+            }
     }
 
     public var canPrint: Bool {
@@ -177,6 +234,8 @@ public class BluetoothPrinterManager: NSObject {
         }
 
         discoveredPeripherals.removeAll()
+        advertisedNames.removeAll()
+        knownServiceDevices.removeAll()
 
         // Scan for all devices to find printers
         centralManager.scanForPeripherals(withServices: nil, options: [
@@ -507,19 +566,36 @@ extension BluetoothPrinterManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                                advertisementData: [String: Any], rssi RSSI: NSNumber) {
 
-        // Filter devices without names
-        guard let name = peripheral.name, !name.isEmpty else { return }
+        let name = peripheral.name ?? ""
+        let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? ""
+        let displayName = !localName.isEmpty ? localName : name
+
+        // Get advertised service UUIDs
+        let serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let serviceUUIDStrings = Set(serviceUUIDs.map { $0.uuidString.uppercased() })
+
+        // Check if this device advertises known printer services
+        let hasKnownService = !serviceUUIDStrings.isDisjoint(with: BluetoothPrinterManager.specifiedServices.map { $0.uppercased() })
 
         // Check if already discovered
         let isNew = discoveredPeripherals[peripheral.identifier] == nil
 
-        // Store peripheral
+        // Store peripheral and cache the advertised name
         discoveredPeripherals[peripheral.identifier] = peripheral
+        if !localName.isEmpty {
+            advertisedNames[peripheral.identifier] = localName
+        }
 
-        // Notify delegate
-        let printer = BluetoothPrinter(peripheral: peripheral)
+        // Track if this device has known printer services
+        if hasKnownService {
+            knownServiceDevices.insert(peripheral.identifier)
+        }
+
+        // Notify delegate - use localName from advertisement if available
+        let printer = BluetoothPrinter(peripheral: peripheral, advertisedName: advertisedNames[peripheral.identifier])
         if isNew {
-            debugPrint("[BluetoothPrinterManager] Discovered: \(name) (\(peripheral.identifier))")
+            let serviceSuffix = hasKnownService ? " [Printer Service]" : ""
+            debugPrint("[BluetoothPrinterManager] Discovered: \(displayName.isEmpty ? "Unknown" : displayName)\(serviceSuffix) (\(peripheral.identifier))")
             notifyChange(.add(printer))
         } else {
             notifyChange(.update(printer))
